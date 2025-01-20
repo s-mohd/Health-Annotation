@@ -1,0 +1,26 @@
+
+.excalidraw .drawings-sidebar {
+	border: 0 !important;
+}
+.excalidraw [title="Library"], .layer-ui__wrapper__footer-right, .dropdown-menu-button{
+	display: none !important;
+}
+.excalidraw-wrapper .App-menu_top__left,.layer-ui__wrapper__footer-left{
+	padding-left: 0
+}
+.excalidraw-wrapper .shapes-section{
+	padding-left: 295px
+}
+.excalidraw-wrapper.leftdrawer-open .App-menu_top__left{
+	padding-left: 240px
+}
+.excalidraw-wrapper .layer-ui__wrapper__footer .footer-center{
+	justify-content: center;
+}
+/* .excalidraw-wrapper.leftdrawer-open .layer-ui__wrapper__footer-left{
+	padding-left: 240px
+} */
+
+.v-overlay__content{
+	overflow-x: hidden;
+}
