@@ -34,6 +34,12 @@ const convertBlobToBase64 = (blob) => {
   });
 }
 
+const formatDate = (dateString) => {
+  const date = new Date(dateString);
+  const options = { year: "numeric", month: "long", day: "numeric" }; // Customize format
+  return date.toLocaleDateString("en-US", options);
+};
+
 export const App = forwardRef((props, ref) => {
   const [params, setParams] = useState({});
   const [index, setIndex] = useState(0);
@@ -65,10 +71,29 @@ export const App = forwardRef((props, ref) => {
     }
     
     setParams(paramsObj);
-    
-    if(!paramsObj.doctype || !paramsObj.docname){
+
+    if(paramsObj.doctype && paramsObj.docname){
+      frappe.call({
+        method: "annotation.api.get_annotation_history",
+        args: { doctype: paramsObj.doctype, docname: paramsObj.docname },
+        callback: function(r) {
+          setAnnotationHistory(r.message.map(value => {
+            value.data = JSON.parse(value.json)
+            return value
+          }))
+        }
+      });
+    }
+    else if(paramsObj.annotation_name){
+      // frappe.db.get_doc('Health Annotation', paramsObj.annotation_name)
+      // .then(doc => {
+      //   doc.data = JSON.parse(doc.json)
+      // })
+    }
+    else{
       frappe.throw('Please open the annotation from an encounter or a procedure!')
     }
+
     frappe.call({
       method: "annotation.api.annotations_records",
       callback: function(r) {
@@ -87,21 +112,22 @@ export const App = forwardRef((props, ref) => {
         })
       }
     });
-
-    frappe.call({
-      method: "annotation.api.get_annotation_history",
-      args: { doctype: paramsObj.doctype, docname: paramsObj.docname },
-      callback: function(r) {
-        setAnnotationHistory(r.message.map(value => {
-          value.data = JSON.parse(value.json)
-          return value
-        }))
-      }
-    });
-
   }, []);
 
   useEffect(() => {
+    if(params.annotation_name){
+      frappe.db.exists('Health Annotation', params.annotation_name)
+      .then(exists => {
+        if(exists){
+          frappe.db.get_doc('Health Annotation', params.annotation_name)
+          .then(doc => {
+            doc.data = JSON.parse(doc.json)
+            importAnnotation(doc)
+          })
+        }
+      })
+    }
+
     const handleKeyDown = (event) => {
       if (event.ctrlKey && event.key === "s") {
         event.preventDefault(); // Prevent the default save action
@@ -584,7 +610,7 @@ export const App = forwardRef((props, ref) => {
                         <ListItemDecorator>
                           <img src={value.image} alt={value.name} style={{ width: '50px', height: '50px', marginRight: '15px' }} />
                         </ListItemDecorator>
-                        {value.creation}
+                        {formatDate(value.creation)}
                       </ListItemButton>
                     ))}
                   </List>
