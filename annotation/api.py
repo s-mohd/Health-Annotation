@@ -1,4 +1,5 @@
 import frappe
+import json
 import base64
 from frappe.utils.file_manager import save_file
 
@@ -8,6 +9,17 @@ def annotations_records():
     treatments = frappe.db.get_list('Annotation Treatment', fields= ['treatment', 'name', 'color'])
     for treatment in treatments:
         treatment.variables = frappe.db.get_all('Treatment Variables Table', fields=['variable_name', 'type', 'options'], filters={'parent': treatment.name})
+
+    for template in templates:
+        parts = frappe.get_all('Annotation Template Part',
+            filters={'template': template.name},
+            fields=['name', 'part_name', 'shape_json', 'color', 'opacity'])
+        for part in parts:
+            part.variables = frappe.get_all('Template Part Variable',
+                filters={'parent': part.name},
+                fields=['variable_name', 'type', 'options'])
+        template.parts = parts
+
     return {'templates': templates, 'treatments': treatments}
 
 @frappe.whitelist()
@@ -33,15 +45,25 @@ def get_annotation_history(doctype, docname):
     return annotations
 
 @frappe.whitelist()
-def save_annotation(docname, doctype, annotation_template, annotation_name=None, encounter_type='', file_data=None, json_text='', annotation_type='Free Drawing'):
+def save_annotation(docname, doctype, annotation_template, annotation_name=None, encounter_type='', file_data=None, json_text='', annotation_type='Free Drawing', annotation_data=''):
     if not file_data:
         frappe.throw("File data is missing")
 
     if annotation_name and frappe.db.exists("Health Annotation", annotation_name):
-        health_annotation = frappe.new_doc('Health Annotation')
+        health_annotation = frappe.get_doc('Health Annotation', annotation_name)
         health_annotation.annotation_template = annotation_template
+        health_annotation.annotation_type = annotation_type
         health_annotation.json = json_text
-        # health_annotation.save()
+
+        # Update annotation_data on the existing child table row
+        doc = frappe.get_doc(doctype, docname)
+        for row in doc.get("custom_annotations", []):
+            if row.annotation == annotation_name:
+                row.annotation_data = annotation_data
+                break
+        doc.flags.ignore_mandatory = True
+        doc.flags.ignore_validate_update_after_submit = True
+        doc.save()
     else:
         health_annotation = frappe.new_doc('Health Annotation')
         health_annotation.annotation_type = annotation_type
@@ -53,7 +75,10 @@ def save_annotation(docname, doctype, annotation_template, annotation_name=None,
         doc.append("custom_annotations", {
             "annotation": health_annotation.name,
             "type": encounter_type,
+            "annotation_data": annotation_data,
         })
+        doc.flags.ignore_mandatory = True
+        doc.flags.ignore_validate_update_after_submit = True
         doc.save()
 
     # Parse the data URL to get the file type and the Base64 data
@@ -76,3 +101,144 @@ def save_annotation(docname, doctype, annotation_template, annotation_name=None,
     health_annotation.save()
 
     # return {"file_url": file_doc.file_url}
+
+
+@frappe.whitelist()
+def get_annotation_summary(doctype, docname):
+    patient = frappe.db.get_value(doctype, docname, 'patient')
+    if not patient:
+        return []
+
+    encounter_records = frappe.get_all('Patient Encounter', filters={'patient': patient}, fields=['name'])
+    procedure_records = frappe.get_all('Clinical Procedure', filters={'patient': patient}, fields=['name'])
+
+    child_records = []
+    for encounter in encounter_records:
+        child_records += frappe.get_all('Health Annotation Table', filters={'parent': encounter['name']}, fields=['annotation', 'annotation_data'])
+    for procedure in procedure_records:
+        child_records += frappe.get_all('Health Annotation Table', filters={'parent': procedure['name']}, fields=['annotation', 'annotation_data'])
+
+    if not child_records:
+        return []
+
+    # Build a map from annotation name to annotation_data
+    annotation_data_map = {}
+    for r in child_records:
+        annotation_data_map[r['annotation']] = r.get('annotation_data', '')
+
+    annotation_names = list(set([r['annotation'] for r in child_records]))
+
+    annotations = frappe.get_all('Health Annotation',
+        filters={'name': ['in', annotation_names]},
+        fields=['name', 'annotation_template', 'image', 'creation'],
+        order_by='creation desc')
+
+    # Fetch template labels
+    template_names = list(set([a['annotation_template'] for a in annotations if a.get('annotation_template')]))
+    template_labels = {}
+    if template_names:
+        templates = frappe.get_all('Annotation Template',
+            filters={'name': ['in', template_names]},
+            fields=['name', 'label'])
+        template_labels = {t['name']: t['label'] for t in templates}
+
+    for anno in annotations:
+        anno['template_label'] = template_labels.get(anno.get('annotation_template'), '')
+        anno['annotation_data'] = annotation_data_map.get(anno['name'], '')
+
+    return annotations
+
+
+@frappe.whitelist()
+def get_template_parts(template):
+    """Get all parts (with variables) for an annotation template."""
+    parts = frappe.get_all(
+        "Annotation Template Part",
+        filters={"template": template},
+        fields=["name", "part_name", "shape_json", "color", "opacity"],
+    )
+    for part in parts:
+        part["variables"] = frappe.get_all(
+            "Template Part Variable",
+            filters={"parent": part["name"]},
+            fields=["variable_name", "type", "options"],
+        )
+    return parts
+
+
+@frappe.whitelist()
+def save_template_parts(template, parts):
+    """Save/update template parts for an annotation template.
+
+    Args:
+        template: Name of the Annotation Template
+        parts: JSON string - array of part objects with:
+            - name (optional, for updates)
+            - part_name
+            - shape_json
+            - color
+            - opacity
+            - variables: array of {variable_name, type, options}
+    """
+    if not frappe.db.exists("Annotation Template", template):
+        frappe.throw(f"Annotation Template '{template}' does not exist")
+
+    if isinstance(parts, str):
+        parts = json.loads(parts)
+
+    if not isinstance(parts, list):
+        frappe.throw("parts must be an array of part objects")
+
+    # Collect incoming part names (for existing parts being updated)
+    incoming_names = {p["name"] for p in parts if p.get("name")}
+
+    # Delete parts for this template that are not in the incoming list
+    existing_parts = frappe.get_all("Annotation Template Part",
+        filters={"template": template},
+        fields=["name"])
+    for existing in existing_parts:
+        if existing.name not in incoming_names:
+            frappe.delete_doc("Annotation Template Part", existing.name)
+
+    saved_parts = []
+    for part_data in parts:
+        if part_data.get("name") and frappe.db.exists("Annotation Template Part", part_data["name"]):
+            doc = frappe.get_doc("Annotation Template Part", part_data["name"])
+        else:
+            doc = frappe.new_doc("Annotation Template Part")
+            doc.template = template
+
+        doc.part_name = part_data.get("part_name")
+        doc.shape_json = part_data.get("shape_json") if isinstance(part_data.get("shape_json"), str) else json.dumps(part_data.get("shape_json"))
+        doc.color = part_data.get("color", "#4dabf7")
+        doc.opacity = part_data.get("opacity", 0.2)
+
+        # Replace variables child table
+        doc.variables = []
+        for var in part_data.get("variables", []):
+            doc.append("variables", {
+                "variable_name": var.get("variable_name"),
+                "type": var.get("type"),
+                "options": var.get("options"),
+            })
+
+        doc.save()
+        saved_parts.append(doc.name)
+
+    # Return the saved parts with full data
+    result = []
+    for part_name in saved_parts:
+        part = frappe.get_doc("Annotation Template Part", part_name)
+        result.append({
+            "name": part.name,
+            "part_name": part.part_name,
+            "shape_json": part.shape_json,
+            "color": part.color,
+            "opacity": part.opacity,
+            "variables": [
+                {"variable_name": v.variable_name, "type": v.type, "options": v.options}
+                for v in part.variables
+            ],
+        })
+
+    return result
